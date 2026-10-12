@@ -72,3 +72,8 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 ### Phase 6: Package
 - [ ] Windows installer
 - [ ] Mac build via GitHub Actions
+
+## Session note — 2026-10-12
+- Completed manual add/edit/delete holdings with local SQLite storage.
+- Added Yahoo Finance prices, cached locally, with market value and gain/loss calculations and tests.
+- Next: build the Phase 1 allocation chart by holding and sector.
