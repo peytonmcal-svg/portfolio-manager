@@ -1,0 +1,21 @@
+# Private financial data and secrets: never commit
+data/*
+!data/.gitkeep
+.env
+
+# Python virtual environment and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Packaging output
+build/
+dist/
+*.spec
+
+# Editor / OS clutter
+.vscode/
+.DS_Store
+Thumbs.db
+*.egg-info/
