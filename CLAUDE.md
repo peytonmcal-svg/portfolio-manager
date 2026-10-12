@@ -56,7 +56,7 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 - [x] Project structure, virtual environment, dependencies, Git repo, first commit
 - [x] Blank app window opens
 ### Phase 1: Core tracker
-- [ ] Manual holdings entry saved to database
+- [x] Manual holdings entry saved to database
 - [ ] Live prices and gain/loss table
 - [ ] Allocation chart
 ### Phase 2: Performance

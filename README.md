@@ -16,6 +16,11 @@ pip install -r requirements.txt -e .
 python -m portfolio_app
 ```
 
+## Manage holdings
+Enter a ticker, number of shares, buy price, and buy date, then choose **Add holding**.
+Select a row to change it or delete it. Holdings are saved in `data/portfolio.db`
+on this computer.
+
 ## Run the tests
 ```
 .venv\Scripts\activate
