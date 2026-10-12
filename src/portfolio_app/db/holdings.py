@@ -2,7 +2,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 import math
 from pathlib import Path
 import sqlite3
@@ -18,6 +18,13 @@ class Holding:
     shares: float
     buy_price: float
     buy_date: str
+
+
+@dataclass(frozen=True)
+class CachedPrice:
+    ticker: str
+    price: float
+    fetched_at: str
 
 
 class HoldingRepository:
@@ -59,6 +66,12 @@ class HoldingRepository:
                     shares REAL NOT NULL CHECK (shares > 0),
                     buy_price REAL NOT NULL CHECK (buy_price > 0),
                     buy_date TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS price_cache (
+                    ticker TEXT PRIMARY KEY,
+                    price REAL NOT NULL CHECK (price > 0),
+                    fetched_at TEXT NOT NULL
                 );
                 """
             )
@@ -140,6 +153,46 @@ class HoldingRepository:
             )
         if cursor.rowcount == 0:
             raise LookupError("The selected holding no longer exists.")
+
+    def get_cached_prices(self) -> dict[str, CachedPrice]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT ticker, price, fetched_at FROM price_cache"
+            ).fetchall()
+        return {
+            str(row["ticker"]): CachedPrice(
+                ticker=str(row["ticker"]),
+                price=float(row["price"]),
+                fetched_at=str(row["fetched_at"]),
+            )
+            for row in rows
+        }
+
+    def save_prices(self, prices: dict[str, float]) -> None:
+        fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        normalized: list[tuple[str, float, str]] = []
+        for ticker, price in prices.items():
+            normalized_ticker = ticker.strip().upper()
+            numeric_price = float(price)
+            if not normalized_ticker:
+                raise ValueError("Ticker symbols cannot be blank.")
+            if not math.isfinite(numeric_price) or numeric_price <= 0:
+                raise ValueError(
+                    f"Price for {normalized_ticker} must be greater than zero."
+                )
+            normalized.append((normalized_ticker, numeric_price, fetched_at))
+
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO price_cache (ticker, price, fetched_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    price = excluded.price,
+                    fetched_at = excluded.fetched_at
+                """,
+                normalized,
+            )
 
     @staticmethod
     def _validated_values(

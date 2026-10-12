@@ -40,6 +40,29 @@ def test_holding_changes_persist_after_repository_reopens(tmp_path):
     assert reopened.list_holdings(portfolio_id)[0].id == holding_id
 
 
+def test_price_cache_is_saved_and_reopened(tmp_path):
+    database_path = tmp_path / "portfolio.db"
+    repository = HoldingRepository(database_path)
+
+    repository.save_prices({"aapl": 190.25})
+    reopened = HoldingRepository(database_path)
+
+    cached_price = reopened.get_cached_prices()["AAPL"]
+    assert cached_price.ticker == "AAPL"
+    assert cached_price.price == 190.25
+    assert cached_price.fetched_at
+
+
+def test_updating_price_cache_keeps_other_symbols(repository):
+    repository.save_prices({"AAPL": 190, "MSFT": 400})
+
+    repository.save_prices({"AAPL": 195})
+
+    cached_prices = repository.get_cached_prices()
+    assert cached_prices["AAPL"].price == 195
+    assert cached_prices["MSFT"].price == 400
+
+
 def test_update_and_delete_only_affect_the_selected_portfolio(repository):
     first_portfolio_id = repository.default_portfolio_id
     with sqlite3.connect(repository.database_path) as connection:

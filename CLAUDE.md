@@ -57,7 +57,7 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 - [x] Blank app window opens
 ### Phase 1: Core tracker
 - [x] Manual holdings entry saved to database
-- [ ] Live prices and gain/loss table
+- [x] Live prices and gain/loss table
 - [ ] Allocation chart
 ### Phase 2: Performance
 - [ ] Portfolio value history, dividend log, S&P 500 comparison
