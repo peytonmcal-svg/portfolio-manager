@@ -67,6 +67,17 @@ def validate_holding(
 
 
 @dataclass(frozen=True)
+class ManualDividend:
+    """A dividend the user entered by hand (total dollars received)."""
+
+    id: int
+    portfolio_id: int
+    ticker: str
+    date: str
+    amount: float
+
+
+@dataclass(frozen=True)
 class CachedPrice:
     ticker: str
     price: float
@@ -104,6 +115,9 @@ class HoldingRepository:
 
     def _initialize_database(self) -> None:
         with self._connect() as connection:
+            had_dividend_history = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name = 'dividend_history'"
+            ).fetchone()
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS portfolios (
@@ -145,8 +159,29 @@ class HoldingRepository:
                     start_date TEXT NOT NULL,
                     fetched_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS dividend_history (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    per_share REAL NOT NULL CHECK (per_share > 0),
+                    PRIMARY KEY (ticker, date)
+                );
+
+                CREATE TABLE IF NOT EXISTS dividends (
+                    id INTEGER PRIMARY KEY,
+                    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id)
+                        ON DELETE CASCADE,
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    amount REAL NOT NULL CHECK (amount >= 0),
+                    UNIQUE (portfolio_id, ticker, date)
+                );
                 """
             )
+            if not had_dividend_history:
+                # History saved before dividends were tracked has none, so
+                # download it again on the next refresh.
+                connection.execute("DELETE FROM history_fetches")
             self._allow_blank_buy_dates(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO portfolios (name) VALUES (?)",
@@ -347,12 +382,89 @@ class HoldingRepository:
     def get_split_history(self) -> dict[str, dict[str, float]]:
         return self._daily_series("SELECT ticker, date, ratio FROM split_history")
 
+    def get_dividend_history(self) -> dict[str, dict[str, float]]:
+        """Dividend per share by ex-dividend date, as reported by Yahoo."""
+        return self._daily_series(
+            "SELECT ticker, date, per_share FROM dividend_history"
+        )
+
+    def list_manual_dividends(self, portfolio_id: int) -> list[ManualDividend]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT id, portfolio_id, ticker, date, amount
+                FROM dividends
+                WHERE portfolio_id = ?
+                ORDER BY date DESC, ticker
+                """,
+                (portfolio_id,),
+            ).fetchall()
+        return [
+            ManualDividend(
+                id=int(row["id"]),
+                portfolio_id=int(row["portfolio_id"]),
+                ticker=str(row["ticker"]),
+                date=str(row["date"]),
+                amount=float(row["amount"]),
+            )
+            for row in rows
+        ]
+
+    def save_manual_dividend(
+        self,
+        portfolio_id: int,
+        ticker: str,
+        dividend_date: str,
+        amount: float,
+        dividend_id: int | None = None,
+    ) -> None:
+        """Add a dividend, or change the one with ``dividend_id``.
+
+        Saving for a ticker and date that already has an entry updates it.
+        An amount of $0 records that an estimated dividend wasn't received.
+        """
+        normalized_ticker = ticker.strip().upper()
+        if not normalized_ticker:
+            raise ValueError("Enter a ticker symbol.")
+        try:
+            parsed_date = date.fromisoformat(dividend_date).isoformat()
+        except ValueError as error:
+            raise ValueError("Enter a valid dividend date.") from error
+        if not math.isfinite(amount) or amount < 0:
+            raise ValueError("Dividend amount can't be negative.")
+
+        with self._connect() as connection:
+            if dividend_id is not None:
+                connection.execute(
+                    "DELETE FROM dividends WHERE id = ? AND portfolio_id = ?",
+                    (dividend_id, portfolio_id),
+                )
+            connection.execute(
+                """
+                INSERT INTO dividends (portfolio_id, ticker, date, amount)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(portfolio_id, ticker, date) DO UPDATE SET
+                    amount = excluded.amount
+                """,
+                (portfolio_id, normalized_ticker, parsed_date, amount),
+            )
+
+    def delete_manual_dividend(self, dividend_id: int, portfolio_id: int) -> None:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM dividends WHERE id = ? AND portfolio_id = ?",
+                (dividend_id, portfolio_id),
+            )
+        if cursor.rowcount == 0:
+            raise LookupError("The selected dividend no longer exists.")
+
     def save_price_history(
         self,
         ticker: str,
         start_date: str,
         closes: dict[str, float],
         splits: dict[str, float],
+        dividends: dict[str, float] | None = None,
     ) -> None:
         """Replace a ticker's saved history with a fresh download.
 
@@ -361,7 +473,8 @@ class HoldingRepository:
         """
         normalized_ticker = ticker.strip().upper()
         fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        for value in (*closes.values(), *splits.values()):
+        dividends = dividends or {}
+        for value in (*closes.values(), *splits.values(), *dividends.values()):
             if not math.isfinite(value) or value <= 0:
                 raise ValueError(
                     f"History for {normalized_ticker} has an invalid value."
@@ -372,6 +485,16 @@ class HoldingRepository:
             )
             connection.execute(
                 "DELETE FROM split_history WHERE ticker = ?", (normalized_ticker,)
+            )
+            connection.execute(
+                "DELETE FROM dividend_history WHERE ticker = ?", (normalized_ticker,)
+            )
+            connection.executemany(
+                """
+                INSERT INTO dividend_history (ticker, date, per_share)
+                VALUES (?, ?, ?)
+                """,
+                [(normalized_ticker, day, value) for day, value in dividends.items()],
             )
             connection.executemany(
                 "INSERT INTO price_history (ticker, date, close) VALUES (?, ?, ?)",

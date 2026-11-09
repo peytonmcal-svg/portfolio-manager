@@ -50,6 +50,14 @@ def split_by_buy_date(
     )
 
 
+def missing_date_note(undated: Iterable[Holding]) -> str:
+    """e.g. "6 holdings left out: buy date missing (AAPL, KO, …)." """
+    undated = list(undated)
+    tickers = ", ".join(sorted({holding.ticker for holding in undated}))
+    noun = "holding" if len(undated) == 1 else "holdings"
+    return f"{len(undated)} {noun} left out: buy date missing ({tickers})."
+
+
 def calculate_value_history(
     holdings: Iterable[Holding],
     price_history: DailySeries,

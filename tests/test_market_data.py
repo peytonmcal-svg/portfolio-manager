@@ -117,11 +117,15 @@ def test_fetch_sector_labels_stocks_funds_and_unknowns(monkeypatch, info, expect
     assert fetch_sector("SPY") == expected
 
 
-def test_fetch_price_history_reads_closes_and_splits(monkeypatch):
+def test_fetch_price_history_reads_closes_splits_and_dividends(monkeypatch):
     import pandas as pd
 
     frame = pd.DataFrame(
-        {"Close": [124.8, 129.0], "Stock Splits": [0.0, 4.0]},
+        {
+            "Close": [124.8, 129.0],
+            "Dividends": [0.0, 0.205],
+            "Stock Splits": [0.0, 4.0],
+        },
         index=pd.DatetimeIndex(
             ["2020-08-28", "2020-08-31"], tz="America/New_York"
         ),
@@ -137,10 +141,11 @@ def test_fetch_price_history_reads_closes_and_splits(monkeypatch):
         lambda ticker: FakeTicker(),
     )
 
-    closes, splits = fetch_price_history("AAPL", "2020-08-28")
+    closes, splits, dividends = fetch_price_history("AAPL", "2020-08-28")
 
     assert closes == {"2020-08-28": 124.8, "2020-08-31": 129.0}
     assert splits == {"2020-08-31": 4.0}
+    assert dividends == {"2020-08-31": 0.205}
 
 
 def test_fetch_price_history_with_no_data_raises(monkeypatch):

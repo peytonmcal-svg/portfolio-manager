@@ -64,7 +64,7 @@ Client accounts, PDF reports, AI features (Claude API), returns in other currenc
 ### Phase 2: Performance
 - [x] Portfolio value history
 - [x] S&P 500 comparison
-- [ ] Dividend log
+- [x] Dividend log
 ### Phase 3: E*TRADE sync
 - [ ] Sandbox connection (read-only)
 - [ ] Production connection (read-only)
@@ -87,3 +87,12 @@ Client accounts, PDF reports, AI features (Claude API), returns in other currenc
 - Sectors come from Yahoo Finance, cached locally, refreshed at most once a day;
   ETFs/funds are labeled "ETF / Fund", unclassified tickers "Unknown".
 - Next: Phase 2, portfolio value history, dividend log, S&P 500 comparison.
+
+## Session note — 2026-11-09
+- Phase 2 complete: value history, SPY comparison, and dividend log (estimates from Yahoo
+  ex-dividend history + manual add/edit; $0 manual entry = not received).
+- Added CSV import; buy date is optional. Holdings with no buy date are left out of value
+  history, the SPY comparison, and dividend estimates, with a note saying how many.
+- Imported 20 holdings from data/holdings_import.csv (all dates missing). Backup of the
+  earlier database: data/portfolio.backup-2026-11-09.db.
+- Next: Phase 3, E*TRADE sandbox connection (read-only).

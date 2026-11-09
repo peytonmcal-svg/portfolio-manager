@@ -37,6 +37,7 @@ from portfolio_app.services.history import (
     calculate_benchmark_history,
     calculate_value_history,
     compare_to_benchmark,
+    missing_date_note,
     split_by_buy_date,
     tickers_split_after_buy,
     tickers_without_history,
@@ -49,6 +50,7 @@ from portfolio_app.services.market_data import (
     fetch_sector,
 )
 from portfolio_app.ui.allocation_chart import AllocationChart
+from portfolio_app.ui.dividends_tab import DividendsTab
 from portfolio_app.ui.value_history_chart import ValueHistoryChart
 
 
@@ -58,10 +60,10 @@ class RefreshResult:
     price_errors: list[str] = field(default_factory=list)
     sectors: dict[str, str] = field(default_factory=dict)
     sector_errors: list[str] = field(default_factory=list)
-    # ticker -> (start date, daily closes, splits)
-    histories: dict[str, tuple[str, dict[str, float], dict[str, float]]] = field(
-        default_factory=dict
-    )
+    # ticker -> (start date, daily closes, splits, dividends per share)
+    histories: dict[
+        str, tuple[str, dict[str, float], dict[str, float], dict[str, float]]
+    ] = field(default_factory=dict)
     history_errors: list[str] = field(default_factory=list)
 
 
@@ -101,8 +103,10 @@ class PriceRefreshTask(QRunnable):
                 result.sector_errors.append(ticker)
         for ticker, start_date in self.history_starts.items():
             try:
-                closes, splits = fetch_price_history(ticker, start_date)
-                result.histories[ticker] = (start_date, closes, splits)
+                result.histories[ticker] = (
+                    start_date,
+                    *fetch_price_history(ticker, start_date),
+                )
             except Exception:
                 result.history_errors.append(ticker)
         self.signals.completed.emit(result)
@@ -221,6 +225,8 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.holdings_table, "Holdings")
         self.tabs.addTab(allocation_tab, "Allocation")
         self.tabs.addTab(performance_tab, "Performance")
+        self.dividends_tab = DividendsTab(self.repository, self.portfolio_id)
+        self.tabs.addTab(self.dividends_tab, "Dividends")
         layout.addWidget(self.tabs)
 
         self.price_status = QLabel()
@@ -294,6 +300,7 @@ class MainWindow(QMainWindow):
             allocation_by_sector(positions, sectors), no_prices_message
         )
         self._reload_value_history(holdings)
+        self.dividends_tab.reload(holdings)
 
         missing_tickers = sorted(
             {
@@ -344,12 +351,11 @@ class MainWindow(QMainWindow):
 
         messages = []
         if undated:
-            undated_tickers = sorted({holding.ticker for holding in undated})
             messages.append(
-                f"Date missing for: {', '.join(undated_tickers)}. These holdings "
-                "are left out of this chart and the "
-                f"{BENCHMARK_TICKER} comparison until a buy date is added "
-                "(select one on the Holdings tab to edit it)."
+                missing_date_note(undated)
+                + f" They're not in this chart or the {BENCHMARK_TICKER} "
+                "comparison until a buy date is added (select one on the "
+                "Holdings tab to edit it)."
             )
         if price_history and missing:
             messages.append(
@@ -451,9 +457,11 @@ class MainWindow(QMainWindow):
         try:
             self.repository.save_prices(result.prices)
             self.repository.save_sectors(result.sectors)
-            for ticker, (start_date, closes, splits) in result.histories.items():
+            for ticker, (
+                start_date, closes, splits, dividends
+            ) in result.histories.items():
                 self.repository.save_price_history(
-                    ticker, start_date, closes, splits
+                    ticker, start_date, closes, splits, dividends
                 )
         except (ValueError, sqlite3.Error) as error:
             QMessageBox.critical(
