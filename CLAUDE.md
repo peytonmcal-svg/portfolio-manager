@@ -44,6 +44,8 @@ Client accounts, PDF reports, AI features (Claude API), returns in other currenc
 - **E*TRADE is read-only.** Never write code that previews, places, changes, or cancels orders.
 - **Secrets:** API keys and tokens go in a `.env` file only. Never commit, print, or log them.
 - **Privacy:** all financial data stays on this computer. `data/` and `.env` are in `.gitignore`.
+  The GitHub repo is public: never copy real holdings (shares, prices, dates) into tests or
+  code; use made-up numbers.
 - **No advice:** the app shows metrics and filters; it never tells the user what to buy or sell.
 - **Free data limits:** cache prices and fundamentals; refresh fundamentals at most once a day.
   If a data source fails, show the last saved value and a clear message instead of crashing.
@@ -89,10 +91,15 @@ Client accounts, PDF reports, AI features (Claude API), returns in other currenc
 - Next: Phase 2, portfolio value history, dividend log, S&P 500 comparison.
 
 ## Session note — 2026-11-09
-- Phase 2 complete: value history, SPY comparison, and dividend log (estimates from Yahoo
-  ex-dividend history + manual add/edit; $0 manual entry = not received).
-- Added CSV import; buy date is optional. Holdings with no buy date are left out of value
-  history, the SPY comparison, and dividend estimates, with a note saying how many.
-- Imported 20 holdings from data/holdings_import.csv (all dates missing). Backup of the
-  earlier database: data/portfolio.backup-2026-11-09.db.
-- Next: Phase 3, E*TRADE sandbox connection (read-only).
+- Phase 2 complete: portfolio value history chart, "if invested in SPY" comparison, and a
+  dividend log (estimates from Yahoo ex-dividend data + manual add/edit; $0 = not received).
+- Added "Import from CSV" (ticker, shares, buy_price, buy_date). Imported Mac's 20 holdings
+  from data/holdings_import.csv, replacing the test holding. Backup of the earlier database:
+  data/portfolio.backup-2026-11-09.db.
+- Buy dates are still missing for most holdings (currently all 20). Until dates are added,
+  they're left out of value history, the SPY comparison, and dividend estimates, with a
+  note like "20 holdings left out: buy date missing". Prices and allocation still work.
+- Fixed before pushing: tests had copied real holdings; replaced with made-up numbers and
+  rewrote the unpushed commits so they never reached GitHub.
+- Next: Phase 3, E*TRADE sync (read-only), sandbox first. Mac needs to request an E*TRADE
+  developer API key (sandbox) and put it in `.env`.
