@@ -124,3 +124,37 @@ def test_sectors_older_than_a_day_are_refetched(repository):
         )
 
     assert repository.tickers_needing_sector(["AAPL"]) == ["AAPL"]
+
+
+def test_price_history_is_saved_and_replaced_on_refetch(repository):
+    repository.save_price_history(
+        "AAPL", "2025-01-02", {"2025-01-02": 100, "2025-01-03": 101}, {}
+    )
+    repository.save_price_history(
+        "AAPL", "2025-01-02", {"2025-01-02": 50}, {"2025-01-03": 2.0}
+    )
+
+    assert repository.get_price_history() == {"AAPL": {"2025-01-02": 50}}
+    assert repository.get_split_history() == {"AAPL": {"2025-01-03": 2.0}}
+
+
+def test_history_refetched_when_missing_stale_or_too_short(repository):
+    repository.save_price_history("AAPL", "2025-01-02", {"2025-01-02": 100}, {})
+    repository.save_price_history("KO", "2025-01-02", {"2025-01-02": 60}, {})
+    repository.save_price_history("MSFT", "2025-01-02", {"2025-01-02": 400}, {})
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "UPDATE history_fetches SET fetched_at = '2020-01-01T00:00:00+00:00' "
+            "WHERE ticker = 'KO'"
+        )
+
+    needed = repository.history_needing_refresh(
+        {
+            "AAPL": "2025-01-02",  # fresh and covers the buy date
+            "KO": "2025-01-02",  # older than a day
+            "MSFT": "2024-06-01",  # new, earlier buy date
+            "SPY": "2025-01-02",  # never fetched
+        }
+    )
+
+    assert needed == {"KO": "2025-01-02", "MSFT": "2024-06-01", "SPY": "2025-01-02"}

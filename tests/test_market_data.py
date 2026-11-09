@@ -7,6 +7,7 @@ from portfolio_app.services.market_data import (
     calculate_portfolio_value,
     calculate_position_value,
     fetch_current_price,
+    fetch_price_history,
     fetch_sector,
 )
 
@@ -114,3 +115,45 @@ def test_fetch_sector_labels_stocks_funds_and_unknowns(monkeypatch, info, expect
     )
 
     assert fetch_sector("SPY") == expected
+
+
+def test_fetch_price_history_reads_closes_and_splits(monkeypatch):
+    import pandas as pd
+
+    frame = pd.DataFrame(
+        {"Close": [124.8, 129.0], "Stock Splits": [0.0, 4.0]},
+        index=pd.DatetimeIndex(
+            ["2020-08-28", "2020-08-31"], tz="America/New_York"
+        ),
+    )
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            assert kwargs["auto_adjust"] is False
+            return frame
+
+    monkeypatch.setattr(
+        "portfolio_app.services.market_data.yfinance.Ticker",
+        lambda ticker: FakeTicker(),
+    )
+
+    closes, splits = fetch_price_history("AAPL", "2020-08-28")
+
+    assert closes == {"2020-08-28": 124.8, "2020-08-31": 129.0}
+    assert splits == {"2020-08-31": 4.0}
+
+
+def test_fetch_price_history_with_no_data_raises(monkeypatch):
+    import pandas as pd
+
+    class FakeTicker:
+        def history(self, **kwargs):
+            return pd.DataFrame()
+
+    monkeypatch.setattr(
+        "portfolio_app.services.market_data.yfinance.Ticker",
+        lambda ticker: FakeTicker(),
+    )
+
+    with pytest.raises(ValueError):
+        fetch_price_history("NOPE", "2020-01-01")

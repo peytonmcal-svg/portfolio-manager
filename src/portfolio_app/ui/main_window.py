@@ -1,4 +1,5 @@
 """The main application window."""
+from dataclasses import dataclass, field
 import sqlite3
 
 from PySide6.QtCore import QDate, QObject, QRunnable, QThreadPool, Qt, Signal
@@ -21,49 +22,78 @@ from PySide6.QtWidgets import (
 )
 
 from portfolio_app.config import APP_NAME
-from portfolio_app.db.holdings import HoldingRepository
+from portfolio_app.db.holdings import Holding, HoldingRepository
 from portfolio_app.services.allocation import (
     allocation_by_holding,
     allocation_by_sector,
+)
+from portfolio_app.services.history import (
+    calculate_value_history,
+    tickers_split_after_buy,
+    tickers_without_history,
 )
 from portfolio_app.services.market_data import (
     calculate_holdings_values,
     calculate_portfolio_value,
     fetch_current_price,
+    fetch_price_history,
     fetch_sector,
 )
 from portfolio_app.ui.allocation_chart import AllocationChart
+from portfolio_app.ui.value_history_chart import ValueHistoryChart
+
+
+@dataclass
+class RefreshResult:
+    prices: dict[str, float] = field(default_factory=dict)
+    price_errors: list[str] = field(default_factory=list)
+    sectors: dict[str, str] = field(default_factory=dict)
+    sector_errors: list[str] = field(default_factory=list)
+    # ticker -> (start date, daily closes, splits)
+    histories: dict[str, tuple[str, dict[str, float], dict[str, float]]] = field(
+        default_factory=dict
+    )
+    history_errors: list[str] = field(default_factory=list)
 
 
 class PriceRefreshSignals(QObject):
-    completed = Signal(object, object, object, object)
+    completed = Signal(object)
 
 
 class PriceRefreshTask(QRunnable):
-    """Fetch prices for every ticker, and sectors only for the given ones."""
+    """Fetch prices for every ticker; sectors and history only where stale."""
 
-    def __init__(self, tickers: list[str], sector_tickers: list[str]) -> None:
+    def __init__(
+        self,
+        tickers: list[str],
+        sector_tickers: list[str],
+        history_starts: dict[str, str],
+    ) -> None:
         super().__init__()
         self.tickers = tickers
         self.sector_tickers = sector_tickers
+        self.history_starts = history_starts
         self.signals = PriceRefreshSignals()
 
     def run(self) -> None:
-        prices: dict[str, float] = {}
-        errors: dict[str, str] = {}
+        result = RefreshResult()
         for ticker in self.tickers:
             try:
-                prices[ticker] = fetch_current_price(ticker)
+                result.prices[ticker] = fetch_current_price(ticker)
             except Exception:
-                errors[ticker] = "Yahoo Finance could not provide a current price."
-        sectors: dict[str, str] = {}
-        sector_errors: list[str] = []
+                result.price_errors.append(ticker)
         for ticker in self.sector_tickers:
             try:
-                sectors[ticker] = fetch_sector(ticker)
+                result.sectors[ticker] = fetch_sector(ticker)
             except Exception:
-                sector_errors.append(ticker)
-        self.signals.completed.emit(prices, errors, sectors, sector_errors)
+                result.sector_errors.append(ticker)
+        for ticker, start_date in self.history_starts.items():
+            try:
+                closes, splits = fetch_price_history(ticker, start_date)
+                result.histories[ticker] = (start_date, closes, splits)
+            except Exception:
+                result.history_errors.append(ticker)
+        self.signals.completed.emit(result)
 
 
 class MainWindow(QMainWindow):
@@ -152,9 +182,18 @@ class MainWindow(QMainWindow):
         allocation_layout.addWidget(self.holding_chart)
         allocation_layout.addWidget(self.sector_chart)
 
+        performance_tab = QWidget()
+        performance_layout = QVBoxLayout(performance_tab)
+        self.value_history_chart = ValueHistoryChart()
+        self.history_status = QLabel()
+        self.history_status.setWordWrap(True)
+        performance_layout.addWidget(self.value_history_chart)
+        performance_layout.addWidget(self.history_status)
+
         self.tabs = QTabWidget()
         self.tabs.addTab(self.holdings_table, "Holdings")
         self.tabs.addTab(allocation_tab, "Allocation")
+        self.tabs.addTab(performance_tab, "Performance")
         layout.addWidget(self.tabs)
 
         self.price_status = QLabel()
@@ -225,6 +264,7 @@ class MainWindow(QMainWindow):
         self.sector_chart.set_slices(
             allocation_by_sector(positions, sectors), no_prices_message
         )
+        self._reload_value_history(holdings)
 
         missing_tickers = sorted(
             {
@@ -250,6 +290,33 @@ class MainWindow(QMainWindow):
                 f"Showing saved prices as of {latest_update.replace('T', ' ')}. "
                 "Choose “Refresh prices” to update."
             )
+
+    def _reload_value_history(self, holdings: list[Holding]) -> None:
+        price_history = self.repository.get_price_history()
+        self.value_history_chart.set_points(
+            calculate_value_history(holdings, price_history),
+            "No price history yet.\nChoose “Refresh prices” to build the chart.",
+        )
+        messages = []
+        missing = tickers_without_history(holdings, price_history)
+        if price_history and missing:
+            messages.append(
+                f"No price history for: {', '.join(missing)}. These holdings are "
+                "left out of the chart (value and money invested)."
+            )
+        split = tickers_split_after_buy(holdings, self.repository.get_split_history())
+        if split:
+            messages.append(
+                f"⚠ {', '.join(split)} had a stock split after your buy date. "
+                "Past prices are split-adjusted, so enter the post-split share "
+                "count and buy price for past values to be correct."
+            )
+        if not messages:
+            messages.append(
+                "Value uses each day’s closing price and excludes dividends. "
+                "Assumes no shares have been sold."
+            )
+        self.history_status.setText("\n".join(messages))
 
     @staticmethod
     def _table_item(text: str) -> QTableWidgetItem:
@@ -278,34 +345,33 @@ class MainWindow(QMainWindow):
         return f"{sign}{value:.2f}%"
 
     def _refresh_prices(self) -> None:
-        tickers = sorted(
-            {
-                holding.ticker
-                for holding in self.repository.list_holdings(self.portfolio_id)
-            }
-        )
+        holdings = self.repository.list_holdings(self.portfolio_id)
+        tickers = sorted({holding.ticker for holding in holdings})
         if not tickers:
             self.price_status.setText("Add holdings before refreshing prices.")
             return
         self.refresh_prices_button.setEnabled(False)
         self.price_status.setText("Getting latest prices from Yahoo Finance…")
         sector_tickers = self.repository.tickers_needing_sector(tickers)
-        self.price_task = PriceRefreshTask(tickers, sector_tickers)
+        earliest_buy: dict[str, str] = {}
+        for holding in holdings:
+            current = earliest_buy.get(holding.ticker, holding.buy_date)
+            earliest_buy[holding.ticker] = min(current, holding.buy_date)
+        history_starts = self.repository.history_needing_refresh(earliest_buy)
+        self.price_task = PriceRefreshTask(tickers, sector_tickers, history_starts)
         self.price_task.signals.completed.connect(self._prices_refreshed)
         self.price_thread_pool.start(self.price_task)
 
-    def _prices_refreshed(
-        self,
-        prices: dict[str, float],
-        errors: dict[str, str],
-        sectors: dict[str, str],
-        sector_errors: list[str],
-    ) -> None:
+    def _prices_refreshed(self, result: RefreshResult) -> None:
         self.refresh_prices_button.setEnabled(True)
         self.price_task = None
         try:
-            self.repository.save_prices(prices)
-            self.repository.save_sectors(sectors)
+            self.repository.save_prices(result.prices)
+            self.repository.save_sectors(result.sectors)
+            for ticker, (start_date, closes, splits) in result.histories.items():
+                self.repository.save_price_history(
+                    ticker, start_date, closes, splits
+                )
         except (ValueError, sqlite3.Error) as error:
             QMessageBox.critical(
                 self, "Price cache error", f"Prices could not be saved:\n{error}"
@@ -314,8 +380,8 @@ class MainWindow(QMainWindow):
             return
 
         self._reload_holdings()
-        if errors:
-            failed_tickers = ", ".join(sorted(errors))
+        if result.price_errors:
+            failed_tickers = ", ".join(sorted(result.price_errors))
             self.price_status.setText(
                 f"Could not refresh: {failed_tickers}. Showing saved prices where "
                 "available; totals exclude holdings without a saved price."
@@ -324,11 +390,17 @@ class MainWindow(QMainWindow):
             self.price_status.setText(
                 "Prices refreshed successfully from Yahoo Finance."
             )
-        if sector_errors:
+        if result.sector_errors:
             self.price_status.setText(
                 f"{self.price_status.text()} Sector unavailable for: "
-                f"{', '.join(sorted(sector_errors))} (shown as last saved or "
-                "“Unknown”)."
+                f"{', '.join(sorted(result.sector_errors))} (shown as last saved "
+                "or “Unknown”)."
+            )
+        if result.history_errors:
+            self.price_status.setText(
+                f"{self.price_status.text()} Price history unavailable for: "
+                f"{', '.join(sorted(result.history_errors))} (showing last saved "
+                "history)."
             )
 
     def _selection_changed(self) -> None:

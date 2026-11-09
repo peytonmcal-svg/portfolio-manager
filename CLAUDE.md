@@ -60,7 +60,9 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 - [x] Live prices and gain/loss table
 - [x] Allocation chart
 ### Phase 2: Performance
-- [ ] Portfolio value history, dividend log, S&P 500 comparison
+- [x] Portfolio value history
+- [ ] S&P 500 comparison
+- [ ] Dividend log
 ### Phase 3: E*TRADE sync
 - [ ] Sandbox connection (read-only)
 - [ ] Production connection (read-only)

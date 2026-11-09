@@ -86,6 +86,26 @@ class HoldingRepository:
                     sector TEXT NOT NULL,
                     fetched_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS price_history (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    close REAL NOT NULL CHECK (close > 0),
+                    PRIMARY KEY (ticker, date)
+                );
+
+                CREATE TABLE IF NOT EXISTS split_history (
+                    ticker TEXT NOT NULL,
+                    date TEXT NOT NULL,
+                    ratio REAL NOT NULL CHECK (ratio > 0),
+                    PRIMARY KEY (ticker, date)
+                );
+
+                CREATE TABLE IF NOT EXISTS history_fetches (
+                    ticker TEXT PRIMARY KEY,
+                    start_date TEXT NOT NULL,
+                    fetched_at TEXT NOT NULL
+                );
                 """
             )
             connection.execute(
@@ -255,6 +275,90 @@ class HoldingRepository:
             if ticker not in cached
             or datetime.fromisoformat(cached[ticker].fetched_at) < cutoff
         ]
+
+    def get_price_history(self) -> dict[str, dict[str, float]]:
+        return self._daily_series("SELECT ticker, date, close FROM price_history")
+
+    def get_split_history(self) -> dict[str, dict[str, float]]:
+        return self._daily_series("SELECT ticker, date, ratio FROM split_history")
+
+    def save_price_history(
+        self,
+        ticker: str,
+        start_date: str,
+        closes: dict[str, float],
+        splits: dict[str, float],
+    ) -> None:
+        """Replace a ticker's saved history with a fresh download.
+
+        The whole range is replaced, not appended, because Yahoo re-adjusts
+        older prices after a split.
+        """
+        normalized_ticker = ticker.strip().upper()
+        fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for value in (*closes.values(), *splits.values()):
+            if not math.isfinite(value) or value <= 0:
+                raise ValueError(
+                    f"History for {normalized_ticker} has an invalid value."
+                )
+        with self._connect() as connection:
+            connection.execute(
+                "DELETE FROM price_history WHERE ticker = ?", (normalized_ticker,)
+            )
+            connection.execute(
+                "DELETE FROM split_history WHERE ticker = ?", (normalized_ticker,)
+            )
+            connection.executemany(
+                "INSERT INTO price_history (ticker, date, close) VALUES (?, ?, ?)",
+                [(normalized_ticker, day, close) for day, close in closes.items()],
+            )
+            connection.executemany(
+                "INSERT INTO split_history (ticker, date, ratio) VALUES (?, ?, ?)",
+                [(normalized_ticker, day, ratio) for day, ratio in splits.items()],
+            )
+            connection.execute(
+                """
+                INSERT INTO history_fetches (ticker, start_date, fetched_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    start_date = excluded.start_date,
+                    fetched_at = excluded.fetched_at
+                """,
+                (normalized_ticker, start_date, fetched_at),
+            )
+
+    def history_needing_refresh(
+        self,
+        start_dates: dict[str, str],
+        max_age: timedelta = timedelta(days=1),
+    ) -> dict[str, str]:
+        """Tickers whose history is missing, older than ``max_age``, or
+        doesn't reach back to the earliest buy date. Maps ticker -> start date.
+        """
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT ticker, start_date, fetched_at FROM history_fetches"
+            ).fetchall()
+        fetches = {str(row["ticker"]): row for row in rows}
+        cutoff = datetime.now(timezone.utc) - max_age
+        needed: dict[str, str] = {}
+        for ticker, start_date in start_dates.items():
+            fetch = fetches.get(ticker)
+            if (
+                fetch is None
+                or str(fetch["start_date"]) > start_date
+                or datetime.fromisoformat(str(fetch["fetched_at"])) < cutoff
+            ):
+                needed[ticker] = start_date
+        return needed
+
+    def _daily_series(self, query: str) -> dict[str, dict[str, float]]:
+        with self._connect() as connection:
+            rows = connection.execute(query).fetchall()
+        series: dict[str, dict[str, float]] = {}
+        for ticker, day, value in rows:
+            series.setdefault(str(ticker), {})[str(day)] = float(value)
+        return series
 
     @staticmethod
     def _validated_values(

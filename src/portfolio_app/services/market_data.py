@@ -53,6 +53,28 @@ def fetch_sector(ticker: str) -> str:
     return UNKNOWN_SECTOR
 
 
+def fetch_price_history(
+    ticker: str, start_date: str
+) -> tuple[dict[str, float], dict[str, float]]:
+    """Daily closes (split-adjusted, not dividend-adjusted) and split ratios."""
+    frame = yfinance.Ticker(ticker).history(
+        start=start_date, auto_adjust=False, actions=True
+    )
+    closes: dict[str, float] = {}
+    splits: dict[str, float] = {}
+    for timestamp, row in frame.iterrows():
+        day = timestamp.date().isoformat()
+        close = float(row["Close"])
+        if math.isfinite(close) and close > 0:
+            closes[day] = close
+        ratio = float(row.get("Stock Splits", 0) or 0)
+        if math.isfinite(ratio) and ratio > 0:
+            splits[day] = ratio
+    if not closes:
+        raise ValueError(f"Yahoo Finance returned no price history for {ticker}.")
+    return closes, splits
+
+
 def calculate_position_value(
     ticker: str,
     shares: float,
