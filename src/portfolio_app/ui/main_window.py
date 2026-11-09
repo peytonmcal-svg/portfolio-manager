@@ -1,10 +1,13 @@
 """The main application window."""
 from dataclasses import dataclass, field
+from pathlib import Path
 import sqlite3
 
 from PySide6.QtCore import QDate, QObject, QRunnable, QThreadPool, Qt, Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QDateEdit,
+    QFileDialog,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
@@ -21,18 +24,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from portfolio_app.config import APP_NAME
+from portfolio_app.config import APP_NAME, DATA_DIR
 from portfolio_app.db.holdings import Holding, HoldingRepository
 from portfolio_app.services.allocation import (
     allocation_by_holding,
     allocation_by_sector,
 )
+from portfolio_app.services.csv_import import CsvImportError, read_holdings_csv
 from portfolio_app.services.history import (
     BENCHMARK_TICKER,
     Comparison,
     calculate_benchmark_history,
     calculate_value_history,
     compare_to_benchmark,
+    split_by_buy_date,
     tickers_split_after_buy,
     tickers_without_history,
 )
@@ -58,6 +63,9 @@ class RefreshResult:
         default_factory=dict
     )
     history_errors: list[str] = field(default_factory=list)
+
+
+DATE_MISSING = "Date missing"
 
 
 class PriceRefreshSignals(QObject):
@@ -127,10 +135,17 @@ class MainWindow(QMainWindow):
         self.buy_date_input.setCalendarPopup(True)
         self.buy_date_input.setDisplayFormat("yyyy-MM-dd")
         self.buy_date_input.setDate(QDate.currentDate())
+        self.date_missing_input = QCheckBox("Date missing")
+        self.date_missing_input.toggled.connect(
+            lambda missing: self.buy_date_input.setEnabled(not missing)
+        )
+        buy_date_row = QHBoxLayout()
+        buy_date_row.addWidget(self.buy_date_input, stretch=1)
+        buy_date_row.addWidget(self.date_missing_input)
         form.addRow("Ticker", self.ticker_input)
         form.addRow("Shares", self.shares_input)
         form.addRow("Buy price ($)", self.buy_price_input)
-        form.addRow("Buy date", self.buy_date_input)
+        form.addRow("Buy date", buy_date_row)
         layout.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -138,6 +153,8 @@ class MainWindow(QMainWindow):
         self.cancel_button = QPushButton("Cancel")
         self.delete_button = QPushButton("Delete selected")
         self.refresh_prices_button = QPushButton("Refresh prices")
+        self.import_button = QPushButton("Import from CSV…")
+        self.import_button.clicked.connect(self._import_csv)
         self.cancel_button.setEnabled(False)
         self.delete_button.setEnabled(False)
         self.save_button.clicked.connect(self._save_holding)
@@ -148,6 +165,7 @@ class MainWindow(QMainWindow):
         buttons.addWidget(self.cancel_button)
         buttons.addWidget(self.delete_button)
         buttons.addWidget(self.refresh_prices_button)
+        buttons.addWidget(self.import_button)
         buttons.addStretch()
         layout.addLayout(buttons)
 
@@ -229,7 +247,9 @@ class MainWindow(QMainWindow):
                     f"{holding.buy_price:.4f}".rstrip("0").rstrip(".")
                 ),
             )
-            self.holdings_table.setItem(row, 3, self._table_item(holding.buy_date))
+            self.holdings_table.setItem(
+                row, 3, self._table_item(holding.buy_date or DATE_MISSING)
+            )
             values = (
                 self._format_currency(position.current_price),
                 self._format_currency(position.cost_basis),
@@ -302,21 +322,35 @@ class MainWindow(QMainWindow):
 
     def _reload_value_history(self, holdings: list[Holding]) -> None:
         price_history = self.repository.get_price_history()
-        missing = tickers_without_history(holdings, price_history)
+        dated, undated = split_by_buy_date(holdings)
+        missing = tickers_without_history(dated, price_history)
         # The SPY comparison uses exactly the holdings the portfolio line uses.
-        tracked = [holding for holding in holdings if holding.ticker not in missing]
+        tracked = [holding for holding in dated if holding.ticker not in missing]
         points = calculate_value_history(tracked, price_history)
         benchmark_points = calculate_benchmark_history(
             tracked, price_history.get(BENCHMARK_TICKER, {})
         )
-        self.value_history_chart.set_points(
-            points,
-            benchmark_points,
-            "No price history yet.\nChoose “Refresh prices” to build the chart.",
-        )
+        if holdings and not dated:
+            empty_message = (
+                "No holdings have a buy date yet.\n"
+                "Add buy dates on the Holdings tab to build this chart."
+            )
+        else:
+            empty_message = (
+                "No price history yet.\nChoose “Refresh prices” to build the chart."
+            )
+        self.value_history_chart.set_points(points, benchmark_points, empty_message)
         self._show_comparison(compare_to_benchmark(points, benchmark_points))
 
         messages = []
+        if undated:
+            undated_tickers = sorted({holding.ticker for holding in undated})
+            messages.append(
+                f"Date missing for: {', '.join(undated_tickers)}. These holdings "
+                "are left out of this chart and the "
+                f"{BENCHMARK_TICKER} comparison until a buy date is added "
+                "(select one on the Holdings tab to edit it)."
+            )
         if price_history and missing:
             messages.append(
                 f"No price history for: {', '.join(missing)}. These holdings are "
@@ -328,7 +362,7 @@ class MainWindow(QMainWindow):
                 f"No {BENCHMARK_TICKER} price history yet, so the comparison line "
                 "is hidden. Choose “Refresh prices” to try again."
             )
-        split = tickers_split_after_buy(holdings, self.repository.get_split_history())
+        split = tickers_split_after_buy(dated, self.repository.get_split_history())
         if split:
             messages.append(
                 f"⚠ {', '.join(split)} had a stock split after your buy date. "
@@ -395,15 +429,17 @@ class MainWindow(QMainWindow):
         self.refresh_prices_button.setEnabled(False)
         self.price_status.setText("Getting latest prices from Yahoo Finance…")
         sector_tickers = self.repository.tickers_needing_sector(tickers)
+        dated, _ = split_by_buy_date(holdings)
         earliest_buy: dict[str, str] = {}
-        for holding in holdings:
+        for holding in dated:
             current = earliest_buy.get(holding.ticker, holding.buy_date)
             earliest_buy[holding.ticker] = min(current, holding.buy_date)
-        # SPY history is needed from the first buy of any holding.
-        first_buy = min(holding.buy_date for holding in holdings)
-        earliest_buy[BENCHMARK_TICKER] = min(
-            earliest_buy.get(BENCHMARK_TICKER, first_buy), first_buy
-        )
+        if dated:
+            # SPY history is needed from the first buy of any holding.
+            first_buy = min(holding.buy_date for holding in dated)
+            earliest_buy[BENCHMARK_TICKER] = min(
+                earliest_buy.get(BENCHMARK_TICKER, first_buy), first_buy
+            )
         history_starts = self.repository.history_needing_refresh(earliest_buy)
         self.price_task = PriceRefreshTask(tickers, sector_tickers, history_starts)
         self.price_task.signals.completed.connect(self._prices_refreshed)
@@ -472,8 +508,12 @@ class MainWindow(QMainWindow):
         self.ticker_input.setText(holding.ticker)
         self.shares_input.setValue(holding.shares)
         self.buy_price_input.setValue(holding.buy_price)
-        year, month, day = map(int, holding.buy_date.split("-"))
-        self.buy_date_input.setDate(QDate(year, month, day))
+        self.date_missing_input.setChecked(holding.buy_date is None)
+        if holding.buy_date is None:
+            self.buy_date_input.setDate(QDate.currentDate())
+        else:
+            year, month, day = map(int, holding.buy_date.split("-"))
+            self.buy_date_input.setDate(QDate(year, month, day))
         self.save_button.setText("Save changes")
         self.cancel_button.setEnabled(True)
         self.delete_button.setEnabled(True)
@@ -484,7 +524,9 @@ class MainWindow(QMainWindow):
                 self.ticker_input.text(),
                 self.shares_input.value(),
                 self.buy_price_input.value(),
-                self.buy_date_input.date().toString("yyyy-MM-dd"),
+                None
+                if self.date_missing_input.isChecked()
+                else self.buy_date_input.date().toString("yyyy-MM-dd"),
             )
             if self.selected_holding_id is None:
                 self.repository.add_holding(self.portfolio_id, *values)
@@ -530,6 +572,70 @@ class MainWindow(QMainWindow):
         self._clear_form()
         self._reload_holdings()
 
+    def _import_csv(self) -> None:
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import holdings from CSV",
+            str(DATA_DIR),
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not file_name:
+            return
+        try:
+            new_holdings = read_holdings_csv(Path(file_name))
+        except CsvImportError as error:
+            QMessageBox.warning(
+                self,
+                "Could not import file",
+                "Nothing was imported. Please fix these problems and try again:"
+                "\n\n" + "\n".join(error.problems[:15])
+                + ("\n…" if len(error.problems) > 15 else ""),
+            )
+            return
+        except OSError as error:
+            QMessageBox.warning(self, "Could not open file", str(error))
+            return
+
+        existing_count = len(self.repository.list_holdings(self.portfolio_id))
+        replace_existing = False
+        if existing_count:
+            question = QMessageBox(self)
+            question.setWindowTitle("Import holdings")
+            question.setText(
+                f"Found {len(new_holdings)} holdings in the file. You already "
+                f"have {existing_count} holding(s)."
+            )
+            question.setInformativeText(
+                "Replace deletes your current holdings and keeps only the "
+                "imported ones. Add keeps both."
+            )
+            replace = question.addButton(
+                "Replace", QMessageBox.ButtonRole.DestructiveRole
+            )
+            add = question.addButton("Add", QMessageBox.ButtonRole.AcceptRole)
+            question.addButton(QMessageBox.StandardButton.Cancel)
+            question.exec()
+            if question.clickedButton() not in (replace, add):
+                return
+            replace_existing = question.clickedButton() is replace
+        try:
+            count = self.repository.import_holdings(
+                self.portfolio_id, new_holdings, replace_existing
+            )
+        except (ValueError, sqlite3.Error) as error:
+            QMessageBox.critical(
+                self, "Import failed", f"Nothing was imported:\n{error}"
+            )
+            return
+
+        self._clear_form()
+        self._reload_holdings()
+        undated = sum(1 for holding in new_holdings if holding.buy_date is None)
+        message = f"Imported {count} holdings."
+        if undated:
+            message += f" {undated} have no buy date and are marked “{DATE_MISSING}”."
+        self.price_status.setText(message + " Choose “Refresh prices” to update.")
+
     def _clear_form(self) -> None:
         self.holdings_table.clearSelection()
         self.selected_holding_id = None
@@ -537,6 +643,7 @@ class MainWindow(QMainWindow):
         self.shares_input.setValue(0)
         self.buy_price_input.setValue(0)
         self.buy_date_input.setDate(QDate.currentDate())
+        self.date_missing_input.setChecked(False)
         self.save_button.setText("Add holding")
         self.cancel_button.setEnabled(False)
         self.delete_button.setEnabled(False)

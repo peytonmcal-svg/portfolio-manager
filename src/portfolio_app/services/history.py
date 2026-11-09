@@ -35,6 +35,21 @@ class Comparison:
     invested: float
 
 
+def split_by_buy_date(
+    holdings: Iterable[Holding],
+) -> tuple[list[Holding], list[Holding]]:
+    """(holdings with a buy date, holdings marked "date missing").
+
+    History and the SPY comparison need a buy date, so they use only the
+    first list.
+    """
+    holdings = list(holdings)
+    return (
+        [holding for holding in holdings if holding.buy_date is not None],
+        [holding for holding in holdings if holding.buy_date is None],
+    )
+
+
 def calculate_value_history(
     holdings: Iterable[Holding],
     price_history: DailySeries,

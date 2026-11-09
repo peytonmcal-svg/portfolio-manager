@@ -1,5 +1,5 @@
 """SQLite storage for portfolios and their holdings."""
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -17,7 +17,53 @@ class Holding:
     ticker: str
     shares: float
     buy_price: float
-    buy_date: str
+    buy_date: str | None  # None when the buy date is unknown ("date missing")
+
+
+@dataclass(frozen=True)
+class NewHolding:
+    """A holding that hasn't been saved yet (e.g. a row from a CSV file)."""
+
+    ticker: str
+    shares: float
+    buy_price: float
+    buy_date: str | None
+
+
+HOLDINGS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS {name} (
+    id INTEGER PRIMARY KEY,
+    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id)
+        ON DELETE CASCADE,
+    ticker TEXT NOT NULL,
+    shares REAL NOT NULL CHECK (shares > 0),
+    buy_price REAL NOT NULL CHECK (buy_price > 0),
+    buy_date TEXT
+);
+"""
+
+
+def validate_holding(
+    ticker: str,
+    shares: float,
+    buy_price: float,
+    buy_date: str | None,
+) -> tuple[str, float, float, str | None]:
+    """Clean up and check one holding's values; a blank date becomes None."""
+    normalized_ticker = ticker.strip().upper()
+    if not normalized_ticker:
+        raise ValueError("Enter a ticker symbol.")
+    if not math.isfinite(shares) or shares <= 0:
+        raise ValueError("Shares must be greater than zero.")
+    if not math.isfinite(buy_price) or buy_price <= 0:
+        raise ValueError("Buy price must be greater than zero.")
+    if buy_date is None or not buy_date.strip():
+        return normalized_ticker, shares, buy_price, None
+    try:
+        parsed_date = date.fromisoformat(buy_date.strip())
+    except ValueError as error:
+        raise ValueError("Enter a valid buy date.") from error
+    return normalized_ticker, shares, buy_price, parsed_date.isoformat()
 
 
 @dataclass(frozen=True)
@@ -64,16 +110,9 @@ class HoldingRepository:
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL UNIQUE
                 );
-
-                CREATE TABLE IF NOT EXISTS holdings (
-                    id INTEGER PRIMARY KEY,
-                    portfolio_id INTEGER NOT NULL REFERENCES portfolios(id)
-                        ON DELETE CASCADE,
-                    ticker TEXT NOT NULL,
-                    shares REAL NOT NULL CHECK (shares > 0),
-                    buy_price REAL NOT NULL CHECK (buy_price > 0),
-                    buy_date TEXT NOT NULL
-                );
+                """
+                + HOLDINGS_TABLE_SQL.format(name="holdings")
+                + """
 
                 CREATE TABLE IF NOT EXISTS price_cache (
                     ticker TEXT PRIMARY KEY,
@@ -108,10 +147,36 @@ class HoldingRepository:
                 );
                 """
             )
+            self._allow_blank_buy_dates(connection)
             connection.execute(
                 "INSERT OR IGNORE INTO portfolios (name) VALUES (?)",
                 ("My Portfolio",),
             )
+
+    @staticmethod
+    def _allow_blank_buy_dates(connection: sqlite3.Connection) -> None:
+        """Upgrade databases made before buy dates were optional.
+
+        SQLite can't relax a NOT NULL rule in place, so the table is copied.
+        """
+        columns = connection.execute("PRAGMA table_info(holdings)").fetchall()
+        if not any(
+            column["name"] == "buy_date" and column["notnull"] for column in columns
+        ):
+            return
+        connection.executescript(
+            "BEGIN;"
+            + HOLDINGS_TABLE_SQL.format(name="holdings_upgraded")
+            + """
+            INSERT INTO holdings_upgraded
+                (id, portfolio_id, ticker, shares, buy_price, buy_date)
+            SELECT id, portfolio_id, ticker, shares, buy_price, buy_date
+            FROM holdings;
+            DROP TABLE holdings;
+            ALTER TABLE holdings_upgraded RENAME TO holdings;
+            COMMIT;
+            """
+        )
 
     @property
     def default_portfolio_id(self) -> int:
@@ -143,9 +208,9 @@ class HoldingRepository:
         ticker: str,
         shares: float,
         buy_price: float,
-        buy_date: str,
+        buy_date: str | None,
     ) -> int:
-        values = self._validated_values(ticker, shares, buy_price, buy_date)
+        values = validate_holding(ticker, shares, buy_price, buy_date)
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -163,9 +228,9 @@ class HoldingRepository:
         ticker: str,
         shares: float,
         buy_price: float,
-        buy_date: str,
+        buy_date: str | None,
     ) -> None:
-        values = self._validated_values(ticker, shares, buy_price, buy_date)
+        values = validate_holding(ticker, shares, buy_price, buy_date)
         with self._connect() as connection:
             cursor = connection.execute(
                 """
@@ -360,25 +425,39 @@ class HoldingRepository:
             series.setdefault(str(ticker), {})[str(day)] = float(value)
         return series
 
-    @staticmethod
-    def _validated_values(
-        ticker: str,
-        shares: float,
-        buy_price: float,
-        buy_date: str,
-    ) -> tuple[str, float, float, str]:
-        normalized_ticker = ticker.strip().upper()
-        if not normalized_ticker:
-            raise ValueError("Enter a ticker symbol.")
-        if not math.isfinite(shares) or shares <= 0:
-            raise ValueError("Shares must be greater than zero.")
-        if not math.isfinite(buy_price) or buy_price <= 0:
-            raise ValueError("Buy price must be greater than zero.")
-        try:
-            parsed_date = date.fromisoformat(buy_date)
-        except ValueError as error:
-            raise ValueError("Enter a valid buy date.") from error
-        return normalized_ticker, shares, buy_price, parsed_date.isoformat()
+    def import_holdings(
+        self,
+        portfolio_id: int,
+        holdings: Iterable[NewHolding],
+        replace_existing: bool,
+    ) -> int:
+        """Save many holdings at once; all are saved or none are.
+
+        With ``replace_existing``, the portfolio's current holdings are deleted
+        first, in the same step.
+        """
+        rows = [
+            (
+                portfolio_id,
+                *validate_holding(
+                    holding.ticker, holding.shares, holding.buy_price, holding.buy_date
+                ),
+            )
+            for holding in holdings
+        ]
+        with self._connect() as connection:
+            if replace_existing:
+                connection.execute(
+                    "DELETE FROM holdings WHERE portfolio_id = ?", (portfolio_id,)
+                )
+            connection.executemany(
+                """
+                INSERT INTO holdings (portfolio_id, ticker, shares, buy_price, buy_date)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
 
     @staticmethod
     def _to_holding(row: sqlite3.Row) -> Holding:
@@ -388,5 +467,5 @@ class HoldingRepository:
             ticker=str(row["ticker"]),
             shares=float(row["shares"]),
             buy_price=float(row["buy_price"]),
-            buy_date=str(row["buy_date"]),
+            buy_date=None if row["buy_date"] is None else str(row["buy_date"]),
         )

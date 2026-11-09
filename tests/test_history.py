@@ -10,6 +10,7 @@ from portfolio_app.services.history import (
     calculate_value_history,
     compare_to_benchmark,
     simple_return_percent,
+    split_by_buy_date,
     tickers_split_after_buy,
     tickers_without_history,
 )
@@ -223,3 +224,19 @@ def test_comparison_is_none_without_overlapping_dates():
         )
         is None
     )
+
+
+def test_date_missing_holdings_are_kept_out_of_history():
+    holdings = [
+        holding("AAPL", 1, 100, "2025-01-02", 1),
+        holding("NEWFX", 10, 80, None, 2),
+    ]
+    history = {"AAPL": {"2025-01-02": 110}, "NEWFX": {"2025-01-02": 90}}
+
+    dated, undated = split_by_buy_date(holdings)
+
+    assert [h.ticker for h in dated] == ["AAPL"]
+    assert [h.ticker for h in undated] == ["NEWFX"]
+    assert calculate_value_history(dated, history) == [
+        ValuePoint("2025-01-02", 110, 100)
+    ]

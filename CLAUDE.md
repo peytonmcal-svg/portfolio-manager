@@ -15,6 +15,8 @@ add multiple portfolios for clients, so keep the code organized so that is possi
 
 ## Version 1 features
 1. **Holdings tracker:** add/edit/delete holdings manually (ticker, shares, buy price, buy date).
+   Also import holdings from a CSV file (ticker, shares, buy_price, buy_date); buy date may be
+   blank ("date missing"; such holdings are left out of value history and the SPY comparison).
 2. **Live prices:** current price, market value, gain/loss ($ and %) per holding and in total.
 3. **Allocation chart:** breakdown by holding and by sector.
 4. **Performance:** portfolio value history chart, dividend income log, comparison vs. S&P 500 (SPY).
@@ -27,7 +29,7 @@ add multiple portfolios for clients, so keep the code organized so that is possi
 9. **Packaging:** installable app for Windows and Mac.
 
 ## Not in version 1
-Client accounts, CSV import, PDF reports, AI features (Claude API), returns in other currencies.
+Client accounts, PDF reports, AI features (Claude API), returns in other currencies.
 
 ## Tech stack
 - Python 3.12+
