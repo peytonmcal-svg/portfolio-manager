@@ -16,7 +16,8 @@ add multiple portfolios for clients, so keep the code organized so that is possi
 ## Version 1 features
 1. **Holdings tracker:** add/edit/delete holdings manually (ticker, shares, buy price, buy date).
    Also import holdings from a CSV file (ticker, shares, buy_price, buy_date); buy date may be
-   blank ("date missing"; such holdings are left out of value history and the SPY comparison).
+   blank ("date missing"; such holdings are left out of value history, the SPY comparison,
+   and dividend estimates).
 2. **Live prices:** current price, market value, gain/loss ($ and %) per holding and in total.
 3. **Allocation chart:** breakdown by holding and by sector.
 4. **Performance:** portfolio value history chart, dividend income log, comparison vs. S&P 500 (SPY).
