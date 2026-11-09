@@ -1,8 +1,11 @@
 """Daily portfolio value rebuilt from buy dates and historical closing prices."""
+from bisect import bisect_left
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from portfolio_app.db.holdings import Holding
+
+BENCHMARK_TICKER = "SPY"
 
 # ticker -> {"YYYY-MM-DD": value}
 DailySeries = Mapping[str, Mapping[str, float]]
@@ -12,6 +15,23 @@ DailySeries = Mapping[str, Mapping[str, float]]
 class ValuePoint:
     date: str
     market_value: float
+    invested: float
+
+
+@dataclass(frozen=True)
+class BenchmarkPoint:
+    date: str
+    value: float
+    invested: float
+
+
+@dataclass(frozen=True)
+class Comparison:
+    date: str
+    portfolio_value: float
+    portfolio_return_percent: float | None
+    benchmark_value: float
+    benchmark_return_percent: float | None
     invested: float
 
 
@@ -54,6 +74,71 @@ def calculate_value_history(
         if invested > 0:
             points.append(ValuePoint(day, market_value, invested))
     return points
+
+
+def calculate_benchmark_history(
+    holdings: Iterable[Holding],
+    benchmark_closes: Mapping[str, float],
+) -> list[BenchmarkPoint]:
+    """Value of buying the benchmark with the same dollars on the same dates.
+
+    Each buy's cost (shares x buy price) buys benchmark shares at the
+    benchmark's close on the buy date, or the next trading day if markets
+    were closed. Buys after the last saved benchmark close are left out.
+    """
+    dates = sorted(benchmark_closes)
+    lots: list[tuple[str, float, float]] = []  # entry date, shares, dollars
+    for holding in holdings:
+        index = bisect_left(dates, holding.buy_date)
+        if index == len(dates):
+            continue
+        entry_date = dates[index]
+        dollars = holding.shares * holding.buy_price
+        lots.append((entry_date, dollars / benchmark_closes[entry_date], dollars))
+    if not lots:
+        return []
+
+    first_entry = min(entry_date for entry_date, _, _ in lots)
+    points: list[BenchmarkPoint] = []
+    for day in dates:
+        if day < first_entry:
+            continue
+        shares = sum(lot_shares for entry, lot_shares, _ in lots if entry <= day)
+        invested = sum(dollars for entry, _, dollars in lots if entry <= day)
+        points.append(BenchmarkPoint(day, shares * benchmark_closes[day], invested))
+    return points
+
+
+def simple_return_percent(value: float, invested: float) -> float | None:
+    """(value - money invested) / money invested, as a percent."""
+    if invested <= 0:
+        return None
+    return (value - invested) / invested * 100
+
+
+def compare_to_benchmark(
+    points: Iterable[ValuePoint],
+    benchmark_points: Iterable[BenchmarkPoint],
+) -> Comparison | None:
+    """Compare both on the latest date that each has a value for."""
+    benchmark_by_date = {point.date: point for point in benchmark_points}
+    for point in reversed(list(points)):
+        benchmark = benchmark_by_date.get(point.date)
+        if benchmark is None:
+            continue
+        return Comparison(
+            date=point.date,
+            portfolio_value=point.market_value,
+            portfolio_return_percent=simple_return_percent(
+                point.market_value, point.invested
+            ),
+            benchmark_value=benchmark.value,
+            benchmark_return_percent=simple_return_percent(
+                benchmark.value, benchmark.invested
+            ),
+            invested=point.invested,
+        )
+    return None
 
 
 def tickers_without_history(

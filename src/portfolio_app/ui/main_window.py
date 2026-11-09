@@ -28,7 +28,11 @@ from portfolio_app.services.allocation import (
     allocation_by_sector,
 )
 from portfolio_app.services.history import (
+    BENCHMARK_TICKER,
+    Comparison,
+    calculate_benchmark_history,
     calculate_value_history,
+    compare_to_benchmark,
     tickers_split_after_buy,
     tickers_without_history,
 )
@@ -184,9 +188,14 @@ class MainWindow(QMainWindow):
 
         performance_tab = QWidget()
         performance_layout = QVBoxLayout(performance_tab)
+        self.comparison_summary = QLabel()
+        summary_font = self.comparison_summary.font()
+        summary_font.setPointSizeF(summary_font.pointSizeF() * 1.2)
+        self.comparison_summary.setFont(summary_font)
         self.value_history_chart = ValueHistoryChart()
         self.history_status = QLabel()
         self.history_status.setWordWrap(True)
+        performance_layout.addWidget(self.comparison_summary)
         performance_layout.addWidget(self.value_history_chart)
         performance_layout.addWidget(self.history_status)
 
@@ -293,30 +302,63 @@ class MainWindow(QMainWindow):
 
     def _reload_value_history(self, holdings: list[Holding]) -> None:
         price_history = self.repository.get_price_history()
+        missing = tickers_without_history(holdings, price_history)
+        # The SPY comparison uses exactly the holdings the portfolio line uses.
+        tracked = [holding for holding in holdings if holding.ticker not in missing]
+        points = calculate_value_history(tracked, price_history)
+        benchmark_points = calculate_benchmark_history(
+            tracked, price_history.get(BENCHMARK_TICKER, {})
+        )
         self.value_history_chart.set_points(
-            calculate_value_history(holdings, price_history),
+            points,
+            benchmark_points,
             "No price history yet.\nChoose “Refresh prices” to build the chart.",
         )
+        self._show_comparison(compare_to_benchmark(points, benchmark_points))
+
         messages = []
-        missing = tickers_without_history(holdings, price_history)
         if price_history and missing:
             messages.append(
                 f"No price history for: {', '.join(missing)}. These holdings are "
-                "left out of the chart (value and money invested)."
+                "left out of the chart (value, money invested, and the "
+                f"{BENCHMARK_TICKER} comparison)."
+            )
+        if points and not benchmark_points:
+            messages.append(
+                f"No {BENCHMARK_TICKER} price history yet, so the comparison line "
+                "is hidden. Choose “Refresh prices” to try again."
             )
         split = tickers_split_after_buy(holdings, self.repository.get_split_history())
         if split:
             messages.append(
                 f"⚠ {', '.join(split)} had a stock split after your buy date. "
-                "Past prices are split-adjusted, so enter the post-split share "
-                "count and buy price for past values to be correct."
+                "Past prices are split-adjusted, so check that shares and buy "
+                "price are entered as post-split numbers (e.g. 2-for-1: double "
+                "the shares, halve the price). If they already are, no change "
+                "is needed."
             )
         if not messages:
             messages.append(
                 "Value uses each day’s closing price and excludes dividends. "
-                "Assumes no shares have been sold."
+                f"The {BENCHMARK_TICKER} line puts each buy’s cost into "
+                f"{BENCHMARK_TICKER} on the same date. Assumes no shares have "
+                "been sold."
             )
         self.history_status.setText("\n".join(messages))
+
+    def _show_comparison(self, comparison: Comparison | None) -> None:
+        if comparison is None:
+            self.comparison_summary.setText("")
+            return
+        self.comparison_summary.setText(
+            f"Your portfolio: {self._format_percent(comparison.portfolio_return_percent)} "
+            f"({self._format_currency(comparison.portfolio_value)})   ·   "
+            f"{BENCHMARK_TICKER}: "
+            f"{self._format_percent(comparison.benchmark_return_percent)} "
+            f"({self._format_currency(comparison.benchmark_value)})   ·   "
+            f"on {self._format_currency(comparison.invested)} invested, "
+            f"as of {comparison.date}"
+        )
 
     @staticmethod
     def _table_item(text: str) -> QTableWidgetItem:
@@ -357,6 +399,11 @@ class MainWindow(QMainWindow):
         for holding in holdings:
             current = earliest_buy.get(holding.ticker, holding.buy_date)
             earliest_buy[holding.ticker] = min(current, holding.buy_date)
+        # SPY history is needed from the first buy of any holding.
+        first_buy = min(holding.buy_date for holding in holdings)
+        earliest_buy[BENCHMARK_TICKER] = min(
+            earliest_buy.get(BENCHMARK_TICKER, first_buy), first_buy
+        )
         history_starts = self.repository.history_needing_refresh(earliest_buy)
         self.price_task = PriceRefreshTask(tickers, sector_tickers, history_starts)
         self.price_task.signals.completed.connect(self._prices_refreshed)

@@ -61,7 +61,7 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 - [x] Allocation chart
 ### Phase 2: Performance
 - [x] Portfolio value history
-- [ ] S&P 500 comparison
+- [x] S&P 500 comparison
 - [ ] Dividend log
 ### Phase 3: E*TRADE sync
 - [ ] Sandbox connection (read-only)
