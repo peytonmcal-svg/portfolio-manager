@@ -58,7 +58,7 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 ### Phase 1: Core tracker
 - [x] Manual holdings entry saved to database
 - [x] Live prices and gain/loss table
-- [ ] Allocation chart
+- [x] Allocation chart
 ### Phase 2: Performance
 - [ ] Portfolio value history, dividend log, S&P 500 comparison
 ### Phase 3: E*TRADE sync
@@ -77,3 +77,9 @@ Client accounts, CSV import, PDF reports, AI features (Claude API), returns in o
 - Completed manual add/edit/delete holdings with local SQLite storage.
 - Added Yahoo Finance prices, cached locally, with market value and gain/loss calculations and tests.
 - Next: build the Phase 1 allocation chart by holding and sector.
+
+## Session note — 2026-11-08
+- Phase 1 complete: added Allocation tab with bar charts by holding and by sector.
+- Sectors come from Yahoo Finance, cached locally, refreshed at most once a day;
+  ETFs/funds are labeled "ETF / Fund", unclassified tickers "Unknown".
+- Next: Phase 2, portfolio value history, dividend log, S&P 500 comparison.
