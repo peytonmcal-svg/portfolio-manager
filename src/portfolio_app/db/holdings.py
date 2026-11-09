@@ -2,7 +2,7 @@
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 import math
 from pathlib import Path
 import sqlite3
@@ -24,6 +24,13 @@ class Holding:
 class CachedPrice:
     ticker: str
     price: float
+    fetched_at: str
+
+
+@dataclass(frozen=True)
+class CachedSector:
+    ticker: str
+    sector: str
     fetched_at: str
 
 
@@ -71,6 +78,12 @@ class HoldingRepository:
                 CREATE TABLE IF NOT EXISTS price_cache (
                     ticker TEXT PRIMARY KEY,
                     price REAL NOT NULL CHECK (price > 0),
+                    fetched_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS sector_cache (
+                    ticker TEXT PRIMARY KEY,
+                    sector TEXT NOT NULL,
                     fetched_at TEXT NOT NULL
                 );
                 """
@@ -193,6 +206,55 @@ class HoldingRepository:
                 """,
                 normalized,
             )
+
+    def get_cached_sectors(self) -> dict[str, CachedSector]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT ticker, sector, fetched_at FROM sector_cache"
+            ).fetchall()
+        return {
+            str(row["ticker"]): CachedSector(
+                ticker=str(row["ticker"]),
+                sector=str(row["sector"]),
+                fetched_at=str(row["fetched_at"]),
+            )
+            for row in rows
+        }
+
+    def save_sectors(self, sectors: dict[str, str]) -> None:
+        fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        normalized: list[tuple[str, str, str]] = []
+        for ticker, sector in sectors.items():
+            normalized_ticker = ticker.strip().upper()
+            normalized_sector = sector.strip()
+            if not normalized_ticker or not normalized_sector:
+                raise ValueError("Ticker and sector cannot be blank.")
+            normalized.append((normalized_ticker, normalized_sector, fetched_at))
+
+        with self._connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO sector_cache (ticker, sector, fetched_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(ticker) DO UPDATE SET
+                    sector = excluded.sector,
+                    fetched_at = excluded.fetched_at
+                """,
+                normalized,
+            )
+
+    def tickers_needing_sector(
+        self, tickers: list[str], max_age: timedelta = timedelta(days=1)
+    ) -> list[str]:
+        """Tickers with no saved sector, or one older than ``max_age``."""
+        cached = self.get_cached_sectors()
+        cutoff = datetime.now(timezone.utc) - max_age
+        return [
+            ticker
+            for ticker in tickers
+            if ticker not in cached
+            or datetime.fromisoformat(cached[ticker].fetched_at) < cutoff
+        ]
 
     @staticmethod
     def _validated_values(

@@ -38,6 +38,21 @@ def fetch_current_price(ticker: str) -> float:
     return price
 
 
+FUND_SECTOR = "ETF / Fund"
+UNKNOWN_SECTOR = "Unknown"
+
+
+def fetch_sector(ticker: str) -> str:
+    """Fetch a ticker's sector; ETFs and funds share one label (no look-through)."""
+    info = yfinance.Ticker(ticker).info
+    if info.get("quoteType") in {"ETF", "MUTUALFUND"}:
+        return FUND_SECTOR
+    sector = info.get("sector")
+    if isinstance(sector, str) and sector.strip():
+        return sector.strip()
+    return UNKNOWN_SECTOR
+
+
 def calculate_position_value(
     ticker: str,
     shares: float,

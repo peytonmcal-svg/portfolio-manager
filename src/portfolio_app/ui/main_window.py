@@ -15,27 +15,37 @@ from PySide6.QtWidgets import (
     QLabel,
     QTableWidget,
     QTableWidgetItem,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from portfolio_app.config import APP_NAME
 from portfolio_app.db.holdings import HoldingRepository
+from portfolio_app.services.allocation import (
+    allocation_by_holding,
+    allocation_by_sector,
+)
 from portfolio_app.services.market_data import (
     calculate_holdings_values,
     calculate_portfolio_value,
     fetch_current_price,
+    fetch_sector,
 )
+from portfolio_app.ui.allocation_chart import AllocationChart
 
 
 class PriceRefreshSignals(QObject):
-    completed = Signal(object, object)
+    completed = Signal(object, object, object, object)
 
 
 class PriceRefreshTask(QRunnable):
-    def __init__(self, tickers: list[str]) -> None:
+    """Fetch prices for every ticker, and sectors only for the given ones."""
+
+    def __init__(self, tickers: list[str], sector_tickers: list[str]) -> None:
         super().__init__()
         self.tickers = tickers
+        self.sector_tickers = sector_tickers
         self.signals = PriceRefreshSignals()
 
     def run(self) -> None:
@@ -46,7 +56,14 @@ class PriceRefreshTask(QRunnable):
                 prices[ticker] = fetch_current_price(ticker)
             except Exception:
                 errors[ticker] = "Yahoo Finance could not provide a current price."
-        self.signals.completed.emit(prices, errors)
+        sectors: dict[str, str] = {}
+        sector_errors: list[str] = []
+        for ticker in self.sector_tickers:
+            try:
+                sectors[ticker] = fetch_sector(ticker)
+            except Exception:
+                sector_errors.append(ticker)
+        self.signals.completed.emit(prices, errors, sectors, sector_errors)
 
 
 class MainWindow(QMainWindow):
@@ -127,7 +144,18 @@ class MainWindow(QMainWindow):
             QHeaderView.ResizeMode.Stretch
         )
         self.holdings_table.itemSelectionChanged.connect(self._selection_changed)
-        layout.addWidget(self.holdings_table)
+
+        allocation_tab = QWidget()
+        allocation_layout = QHBoxLayout(allocation_tab)
+        self.holding_chart = AllocationChart("By holding")
+        self.sector_chart = AllocationChart("By sector")
+        allocation_layout.addWidget(self.holding_chart)
+        allocation_layout.addWidget(self.sector_chart)
+
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.holdings_table, "Holdings")
+        self.tabs.addTab(allocation_tab, "Allocation")
+        layout.addWidget(self.tabs)
 
         self.price_status = QLabel()
         layout.addWidget(self.price_status)
@@ -183,6 +211,20 @@ class MainWindow(QMainWindow):
             item = self._table_item(value)
             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsSelectable)
             self.holdings_table.setItem(total_row, column, item)
+
+        no_prices_message = (
+            "No priced holdings yet.\nChoose “Refresh prices” to see allocation."
+        )
+        self.holding_chart.set_slices(
+            allocation_by_holding(positions), no_prices_message
+        )
+        sectors = {
+            ticker: cached.sector
+            for ticker, cached in self.repository.get_cached_sectors().items()
+        }
+        self.sector_chart.set_slices(
+            allocation_by_sector(positions, sectors), no_prices_message
+        )
 
         missing_tickers = sorted(
             {
@@ -247,17 +289,23 @@ class MainWindow(QMainWindow):
             return
         self.refresh_prices_button.setEnabled(False)
         self.price_status.setText("Getting latest prices from Yahoo Finance…")
-        self.price_task = PriceRefreshTask(tickers)
+        sector_tickers = self.repository.tickers_needing_sector(tickers)
+        self.price_task = PriceRefreshTask(tickers, sector_tickers)
         self.price_task.signals.completed.connect(self._prices_refreshed)
         self.price_thread_pool.start(self.price_task)
 
     def _prices_refreshed(
-        self, prices: dict[str, float], errors: dict[str, str]
+        self,
+        prices: dict[str, float],
+        errors: dict[str, str],
+        sectors: dict[str, str],
+        sector_errors: list[str],
     ) -> None:
         self.refresh_prices_button.setEnabled(True)
         self.price_task = None
         try:
             self.repository.save_prices(prices)
+            self.repository.save_sectors(sectors)
         except (ValueError, sqlite3.Error) as error:
             QMessageBox.critical(
                 self, "Price cache error", f"Prices could not be saved:\n{error}"
@@ -275,6 +323,12 @@ class MainWindow(QMainWindow):
         else:
             self.price_status.setText(
                 "Prices refreshed successfully from Yahoo Finance."
+            )
+        if sector_errors:
+            self.price_status.setText(
+                f"{self.price_status.text()} Sector unavailable for: "
+                f"{', '.join(sorted(sector_errors))} (shown as last saved or "
+                "“Unknown”)."
             )
 
     def _selection_changed(self) -> None:

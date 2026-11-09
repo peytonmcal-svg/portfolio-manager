@@ -7,6 +7,7 @@ from portfolio_app.services.market_data import (
     calculate_portfolio_value,
     calculate_position_value,
     fetch_current_price,
+    fetch_sector,
 )
 
 
@@ -91,3 +92,25 @@ def test_fetch_current_price_rejects_invalid_quotes(monkeypatch, price):
 
     with pytest.raises(ValueError):
         fetch_current_price("AAPL")
+
+
+@pytest.mark.parametrize(
+    ("info", "expected"),
+    [
+        ({"quoteType": "EQUITY", "sector": "Technology"}, "Technology"),
+        ({"quoteType": "ETF", "category": "Large Blend"}, "ETF / Fund"),
+        ({"quoteType": "MUTUALFUND"}, "ETF / Fund"),
+        ({"quoteType": "EQUITY"}, "Unknown"),
+    ],
+)
+def test_fetch_sector_labels_stocks_funds_and_unknowns(monkeypatch, info, expected):
+    class FakeTicker:
+        pass
+
+    FakeTicker.info = info
+    monkeypatch.setattr(
+        "portfolio_app.services.market_data.yfinance.Ticker",
+        lambda ticker: FakeTicker(),
+    )
+
+    assert fetch_sector("SPY") == expected

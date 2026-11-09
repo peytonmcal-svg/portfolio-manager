@@ -107,3 +107,20 @@ def test_rejects_invalid_holding_values(
         repository.add_holding(
             repository.default_portfolio_id, ticker, shares, buy_price, buy_date
         )
+
+
+def test_sectors_are_saved_and_fresh_ones_are_not_refetched(repository):
+    repository.save_sectors({" aapl ": "Technology"})
+
+    assert repository.get_cached_sectors()["AAPL"].sector == "Technology"
+    assert repository.tickers_needing_sector(["AAPL", "KO"]) == ["KO"]
+
+
+def test_sectors_older_than_a_day_are_refetched(repository):
+    repository.save_sectors({"AAPL": "Technology"})
+    with sqlite3.connect(repository.database_path) as connection:
+        connection.execute(
+            "UPDATE sector_cache SET fetched_at = '2020-01-01T00:00:00+00:00'"
+        )
+
+    assert repository.tickers_needing_sector(["AAPL"]) == ["AAPL"]
